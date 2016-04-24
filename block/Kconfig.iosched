@@ -32,6 +32,13 @@ config IOSCHED_CFQ
 
 	  This is the default I/O scheduler.
 
+config IOSCHED_LOOK
+	tristate "Look I/O scheduler"
+	default y
+	---help---
+		help
+
+
 config CFQ_GROUP_IOSCHED
 	bool "CFQ Group Scheduling support"
 	depends on IOSCHED_CFQ && BLK_CGROUP
@@ -48,6 +55,10 @@ choice
 
 	config DEFAULT_DEADLINE
 		bool "Deadline" if IOSCHED_DEADLINE=y
+
+	config DEFAULT_LOOK
+		bool "LOOK" if IOSCHED_LOOK=y
+
 
 	config DEFAULT_CFQ
 		bool "CFQ" if IOSCHED_CFQ=y

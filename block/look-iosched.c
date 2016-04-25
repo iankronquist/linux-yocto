@@ -11,34 +11,51 @@ struct look_data {
 	//struct list_head *cur_pos;
 };
 
+void print_list(struct look_data *ld) {
+	struct list_head *entry = &ld->queue;
+	if (!list_empty(&ld->queue)) {
+		list_for_each(entry, &ld->queue) {
+			struct request *rq = list_entry(entry, struct request, queuelist);
+			printk("%lu, ", blk_rq_pos(rq));
+		}
+	}
+	printk("--\n");
+}
+
 
 // Choose the next request to service
 static int look_dispatch(struct request_queue *q, int force)
 {
-	// Get the current position of the read head
-	sector_t position = rq_end_sector(rq);
-
-	// For each entry
+	sector_t position, position_i;
 	struct list_head *entry;
-	list_for_each(entry, &ld->queue) {
-		// Unwrap the current request and get its position
-		struct request *rq = list_entry(entry, struct request, queuelist);
-		position_i = blk_rq_pos(rqi);
-		// If the position in the queue is greater than the current one
-		if (position_i > position) {
-			//ld->cur_pos = entry;
-			// Go backward one step
-			entry = list_prev_entry(entry);
-			rq = list_entry(entry, struct request, queuelist);
-
-			// Remove the entry
-			list_del(entry);
-			// Dispatch the request
-			elv_dispatch_sort(q, rq);
-			return 1;
+	// The elevator data is a void*
+	struct look_data *ld = q->elevator->elevator_data;
+	// print_list(ld);
+	if (!list_empty(&ld->queue)) {
+		struct request *rq;
+		rq = list_entry(ld->queue.next, struct request, queuelist);
+		// Get the current position of the read head
+		position = rq_end_sector(rq);
+		// For each entry
+		list_for_each(entry, &ld->queue) {
+			// Unwrap the current request and get its position
+			struct request *rq = list_entry(entry, struct request, queuelist);
+			position_i = blk_rq_pos(rq);
+			// If the position in the queue is greater than the current one
+			if (position_i > position) {
+				//ld->cur_pos = entry;
+				// Go backward one step
+				entry = entry->prev;
+				rq = list_entry(entry, struct request, queuelist);
+				break;
+			}
 		}
+		// Remove the entry
+		list_del_init(&rq->queuelist);
+		// Dispatch the request
+		elv_dispatch_sort(q, rq);
+		return 1;
 	}
-	// If we couldn't find any requests starting at the beginning
 	return 0;
 }
 
@@ -56,26 +73,16 @@ static int rq_cmp(void *priv, struct list_head *a, struct list_head *b)
 static void look_add_request(struct request_queue *q, struct request *rq)
 {
 	// The elevator data is a void*
-	struct noop_data *nd = q->elevator->elevator_data;
+	struct look_data *ld = q->elevator->elevator_data;
 
-	/*
-	// Acquire the lock
-	spin_lock_irq(q->queue_lock);
-	// Attempt to merge the request into an existing request. Returns true if
-	// it succeeded.
-	bool merged = elv_attempt_insert_merge(r, rq);
-	spin_unlock_irq(q->queue_lock);
-	 */
-	// If we didn't merge, insert it into the list in sorted order.
-	//if (!merged) {
-	list_add(&rq->queuelist, &nd->queue);
-	list_sort(NULL, &nq->queue, rq_cmp);
-	//}
+	list_add(&rq->queuelist, &ld->queue);
+	list_sort(NULL, &ld->queue, rq_cmp);
 }
 
 
 static int look_init_queue(struct request_queue *q, struct elevator_type *e)
 {
+    printk("initing i/o\n");
 	struct look_data *ld;
 	struct elevator_queue *eq;
 	// Allocate the elevator
@@ -84,7 +91,7 @@ static int look_init_queue(struct request_queue *q, struct elevator_type *e)
 		return -ENOMEM;
 
 	// Allocate memory for the look data.
-	ld = kmalloc_node(sizeof(*nd), GFP_KERNEL, q->nore);
+	ld = kmalloc_node(sizeof(*ld), GFP_KERNEL, q->node);
 	if (ld == NULL) {
 		kobject_put(&eq->kobj);
 		return -ENOMEM;
@@ -94,13 +101,22 @@ static int look_init_queue(struct request_queue *q, struct elevator_type *e)
 
 	// Initialize the look data queue
 	INIT_LIST_HEAD(&ld->queue);
-	ld->cur_pos = &ld->queue;
+	//ld->cur_pos = &ld->queue;
 	// Acquire the lock and set the queue's elevator queue
 	spin_lock_irq(q->queue_lock);
 	q->elevator = eq;
 	spin_unlock_irq(q->queue_lock);
 	return 0;
 }
+
+/* FIXME In progress
+static int look_merge(struct request_queue *q, struct request **req,
+		struct bio *bio)
+{
+	struct look_data *ld = e->elevator_data;
+	sector_t sect = bio_end_sector(bio);
+}
+*/
 
 static void look_exit_queue(struct elevator_queue *e)
 {

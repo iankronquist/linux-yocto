@@ -7,7 +7,7 @@
 #include <linux/rbtree.h>
 
 #define DEBUG 1
-#define SSTF 0
+#define SSTF 1
 
 struct look_data {
 	struct rb_root root;
@@ -29,7 +29,7 @@ void print_list(struct look_data *ld) {
 // Returns NULL if the tree is empty
 // The macro SSTF controls whether we consider branches less than sector.
 // Set SSTF to 1 to make the algorithm SSTF
-// Setting it to 0 makes the algorithm C-Look
+// Setting it to 0 makes the algorithm a C-Look variant
 static struct request *
 look_elv_rb_find_closest(struct rb_root *root, sector_t sector)
 {

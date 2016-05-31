@@ -57,6 +57,9 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/syscalls.h>
+#include <linux/rbtree.h>
+#include <linux/rbtree_augmented.h> /* RB_BLACK */
 #include <linux/slab.h>
 
 #include <linux/mm.h>
@@ -100,6 +103,57 @@ typedef struct slob_block slob_t;
 static LIST_HEAD(free_slob_small);
 static LIST_HEAD(free_slob_medium);
 static LIST_HEAD(free_slob_large);
+static struct rb_root root = RB_ROOT;
+
+// Thank you Greg KH for your LWN article: https://lwn.net/Articles/184495/
+static void rb_insert(struct rb_root *root, struct page *rq)
+{
+	struct rb_node **p = &root->rb_node;
+	struct rb_node *parent = NULL;
+	struct page *__rq;
+
+	while (*p) {
+		parent = *p;
+		__rq = rb_entry(parent, struct page, node);
+
+		if (rq->units < __rq->units)
+			p = &(*p)->rb_left;
+		else if (rq->units >= __rq->units)
+			p = &(*p)->rb_right;
+	}
+	rb_link_node(&rq->node, parent, p);
+	rb_insert_color(&rq->node, root);
+}
+
+static struct page *rb_closest(struct rb_root *root, struct page *sp) {
+	struct rb_node *node = root->rb_node;
+	struct page *closest = NULL, *p;
+	int closest_units_diff = INT_MAX;
+	int units = sp->units;
+	while (node) {
+		p = rb_entry(node, struct page, node);
+		if (units < p->units) {
+			node = node->rb_right;
+			if (p->units - units < closest_units_diff) {
+				closest = p;
+				closest_units_diff = p->units - units;
+			}
+		} else if (units > p->units) {
+			node = node->rb_left;
+			if (units - p->units < closest_units_diff) {
+				closest = p;
+				closest_units_diff = units - p->units;
+			}
+		} else {
+			closest =  p;
+			break;
+		}
+	}
+	if (closest == NULL || closest->units < units) {
+		return NULL;
+	}
+	return closest;
+}
 
 /*
  * slob_page_free: true for pages on free_slob_pages list.
@@ -112,12 +166,14 @@ static inline int slob_page_free(struct page *sp)
 static void set_slob_page_free(struct page *sp, struct list_head *list)
 {
 	list_add(&sp->list, list);
+	rb_insert(&root, sp);
 	__SetPageSlobFree(sp);
 }
 
 static inline void clear_slob_page_free(struct page *sp)
 {
 	list_del(&sp->list);
+	rb_erase(&sp->node, &root);
 	__ClearPageSlobFree(sp);
 }
 
@@ -267,8 +323,7 @@ static void *slob_page_alloc(struct page *sp, size_t size, int align)
  */
 static void *slob_alloc(size_t size, gfp_t gfp, int align, int node)
 {
-	struct page *sp;
-	struct list_head *prev;
+	struct page *sp, *best = NULL, *rb_best;
 	struct list_head *slob_list;
 	slob_t *b = NULL;
 	unsigned long flags;
@@ -281,6 +336,10 @@ static void *slob_alloc(size_t size, gfp_t gfp, int align, int node)
 		slob_list = &free_slob_large;
 
 	spin_lock_irqsave(&slob_lock, flags);
+	sp = list_first_entry(slob_list, typeof(*sp), list);
+	best = rb_closest(&root, sp);
+	if (best != NULL)
+		goto alloc;
 	/* Iterate through each partially free page, try to find room */
 	list_for_each_entry(sp, slob_list, list) {
 #ifdef CONFIG_NUMA
@@ -295,20 +354,23 @@ static void *slob_alloc(size_t size, gfp_t gfp, int align, int node)
 		if (sp->units < SLOB_UNITS(size))
 			continue;
 
-		/* Attempt to alloc */
-		prev = sp->list.prev;
-		b = slob_page_alloc(sp, size, align);
-		if (!b)
+		if (best == NULL) {
+			best = sp;
 			continue;
-
-		/* Improve fragment distribution and reduce our average
-		 * search time by starting our next search here. (see
-		 * Knuth vol 1, sec 2.5, pg 449) */
-		if (prev != slob_list->prev &&
-				slob_list->next != prev->next)
-			list_move_tail(slob_list, prev->next);
-		break;
+		}
+		if (sp->units < best->units)
+			best = sp;
+		// Can't do better than equality
+		if (sp->units == best->units) {
+			best = sp;
+			break;
+		}
 	}
+	if (best != NULL) {
+alloc:
+		b = slob_page_alloc(best, size, align);
+	}
+
 	spin_unlock_irqrestore(&slob_lock, flags);
 
 	/* Not enough space: must allocate a new page */
@@ -333,6 +395,27 @@ static void *slob_alloc(size_t size, gfp_t gfp, int align, int node)
 		memset(b, 0, size);
 	return b;
 }
+
+SYSCALL_DEFINE0(mem_usage)
+{
+	struct page *sp;
+	unsigned long flags;
+	int length = 0;
+
+	spin_lock_irqsave(&slob_lock, flags);
+	list_for_each_entry(sp, &free_slob_small, list) {
+		length += sp->units;
+	}
+	list_for_each_entry(sp, &free_slob_medium, list) {
+		length += sp->units;
+	}
+	list_for_each_entry(sp, &free_slob_large, list) {
+		length += sp->units;
+	}
+	spin_unlock_irqrestore(&slob_lock, flags);
+	return length;
+}
+
 
 /*
  * slob_free: entry point into the slob allocator.

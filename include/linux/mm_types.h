@@ -114,6 +114,7 @@ struct page {
 					};
 					int units;	/* SLOB */
 				};
+				struct rb_node node; /* SLOB */
 				atomic_t _count;		/* Usage count, see below. */
 			};
 			unsigned int active;	/* SLAB */

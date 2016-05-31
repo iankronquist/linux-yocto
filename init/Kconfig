@@ -1580,7 +1580,6 @@ config SLUB
 	   a slab allocator.
 
 config SLOB
-	depends on EXPERT
 	bool "SLOB (Simple Allocator)"
 	help
 	   SLOB replaces the stock allocator with a drastically simpler

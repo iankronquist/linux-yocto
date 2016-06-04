@@ -16,6 +16,7 @@
 int main(int argc, char **argv) {
 	FILE *f;
 	long num_secs, usage, total, i;
+	double result;
 	time_t now, start;
 	if (argc != 3) {
 		fprintf(stderr, "Usage: %s <file> <seconds>\n", argv[0]);
@@ -28,8 +29,9 @@ int main(int argc, char **argv) {
 	for (i = 0; i < num_secs; ++i) {
 		usage = syscall(__NR_mem_usage);
 		total = syscall(__NR_mem_size);
-		now = time(NULL);
-		fprintf(f, "%lu, %lu\n", now, 1-usage/total);
+		result = 1.0 - (double)usage/(double)total;
+		now = time(NULL) - start;
+		fprintf(f, "%lu, %f\n", now, result);
 		sleep(1);
 	}
 	fclose(f);

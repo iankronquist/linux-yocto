@@ -86,12 +86,18 @@
  */
 #if PAGE_SIZE <= (32767 * 2)
 typedef s16 slobidx_t;
+#define SLOB_MAX SHRT_MAX
 #else
 typedef s32 slobidx_t;
+#define SLOB_MAX INT_MAX
 #endif
+
+static unsigned long slob_heap_size;
+static unsigned long slob_heap_used;
 
 struct slob_block {
 	slobidx_t units;
+	struct rb_node *node;
 };
 typedef struct slob_block slob_t;
 
@@ -256,7 +262,7 @@ static void *slob_new_pages(gfp_t gfp, int order, int node)
 
 	if (!page)
 		return NULL;
-
+	slob_heap_size += PAGE_SIZE;
 	return page_address(page);
 }
 
@@ -264,6 +270,7 @@ static void slob_free_pages(void *b, int order)
 {
 	if (current->reclaim_state)
 		current->reclaim_state->reclaimed_slab += 1 << order;
+	slob_heap_size -= PAGE_SIZE;
 	free_pages((unsigned long)b, order);
 }
 
@@ -274,48 +281,75 @@ static void *slob_page_alloc(struct page *sp, size_t size, int align)
 {
 	slob_t *prev, *cur, *aligned = NULL;
 	int delta = 0, units = SLOB_UNITS(size);
+	int best_delta = 0;
+	slob_t *next, *best = NULL, *best_prev, *best_aligned;
+	slobidx_t best_avail = SLOB_MAX, avail;
 
 	for (prev = NULL, cur = sp->freelist; ; prev = cur, cur = slob_next(cur)) {
-		slobidx_t avail = slob_units(cur);
+		avail = slob_units(cur);
 
 		if (align) {
 			aligned = (slob_t *)ALIGN((unsigned long)cur, align);
 			delta = aligned - cur;
 		}
 		if (avail >= units + delta) { /* room enough? */
-			slob_t *next;
-
-			if (delta) { /* need to fragment head to align? */
-				next = slob_next(cur);
-				set_slob(aligned, avail - delta, next);
-				set_slob(cur, delta, aligned);
-				prev = cur;
-				cur = aligned;
-				avail = slob_units(cur);
+			if (avail - (units + delta) == 0) {
+				// pick it
+				best_delta = delta;
+				best_avail = avail;
+				best = cur;
+				best_aligned = aligned;
+				best_prev = prev;
+				break;
+			} else if (avail - (units + delta) <=
+					best_avail - (units + best_delta)) {
+				best_delta = delta;
+				best_avail = avail;
+				best = cur;
+				best_aligned = aligned;
+				best_prev = prev;
 			}
-
-			next = slob_next(cur);
-			if (avail == units) { /* exact fit? unlink. */
-				if (prev)
-					set_slob(prev, slob_units(prev), next);
-				else
-					sp->freelist = next;
-			} else { /* fragment */
-				if (prev)
-					set_slob(prev, slob_units(prev), cur + units);
-				else
-					sp->freelist = cur + units;
-				set_slob(cur + units, avail - units, next);
-			}
-
-			sp->units -= units;
-			if (!sp->units)
-				clear_slob_page_free(sp);
-			return cur;
 		}
 		if (slob_last(cur))
-			return NULL;
+			break;
 	}
+	if (best == NULL) {
+		return NULL;
+	}
+	cur = best;
+	prev = best_prev;
+	avail = best_avail;
+	delta = best_delta;
+	aligned = best_aligned;
+
+	if (delta) { /* need to fragment head to align? */
+		next = slob_next(cur);
+		set_slob(aligned, avail - delta, next);
+		set_slob(cur, delta, aligned);
+		prev = cur;
+		cur = aligned;
+		avail = slob_units(cur);
+	}
+
+	next = slob_next(cur);
+	if (avail == units) { /* exact fit? unlink. */
+		if (prev)
+			set_slob(prev, slob_units(prev), next);
+		else
+			sp->freelist = next;
+	} else { /* fragment */
+		if (prev)
+			set_slob(prev, slob_units(prev), cur + units);
+		else
+			sp->freelist = cur + units;
+		set_slob(cur + units, avail - units, next);
+	}
+
+	sp->units -= units;
+	if (!sp->units)
+		clear_slob_page_free(sp);
+	slob_heap_used += units;
+	return cur;
 }
 
 /*
@@ -323,7 +357,7 @@ static void *slob_page_alloc(struct page *sp, size_t size, int align)
  */
 static void *slob_alloc(size_t size, gfp_t gfp, int align, int node)
 {
-	struct page *sp, *best = NULL, *rb_best;
+	struct page *sp, *best = NULL;
 	struct list_head *slob_list;
 	slob_t *b = NULL;
 	unsigned long flags;
@@ -398,22 +432,12 @@ alloc:
 
 SYSCALL_DEFINE0(mem_usage)
 {
-	struct page *sp;
-	unsigned long flags;
-	int length = 0;
+	return slob_heap_used;
+}
 
-	spin_lock_irqsave(&slob_lock, flags);
-	list_for_each_entry(sp, &free_slob_small, list) {
-		length += sp->units;
-	}
-	list_for_each_entry(sp, &free_slob_medium, list) {
-		length += sp->units;
-	}
-	list_for_each_entry(sp, &free_slob_large, list) {
-		length += sp->units;
-	}
-	spin_unlock_irqrestore(&slob_lock, flags);
-	return length;
+SYSCALL_DEFINE0(mem_size)
+{
+	return slob_heap_size;
 }
 
 
@@ -470,6 +494,7 @@ static void slob_free(void *block, int size)
 	 * point.
 	 */
 	sp->units += units;
+	slob_heap_used -= units;
 
 	if (b < (slob_t *)sp->freelist) {
 		if (b + units == sp->freelist) {
